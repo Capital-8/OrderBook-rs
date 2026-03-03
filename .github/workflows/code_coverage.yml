@@ -4,13 +4,13 @@ on:
   push:
     branches:
       - main
-      - 'feature/**'
-      - 'fix/**'
-      - 'release/**'
+      - "feature/**"
+      - "fix/**"
+      - "release/**"
   pull_request:
     branches:
       - main
-      - 'release/**'
+      - "release/**"
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,12 +24,13 @@ jobs:
         with:
           profile: minimal
           toolchain: stable
+          components: llvm-tools-preview
           override: true
       - name: Install dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y make libfontconfig1-dev pkg-config
       # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-      # INSTALL TARPALUIN FOR CODE COVERAGE
+      # INSTALL TARPAULIN FOR CODE COVERAGE
       # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       - name: Install Tarpaulin.
         run: cargo install cargo-tarpaulin
@@ -37,8 +38,8 @@ jobs:
       # GENERATE CODE COVERAGE REPORT
       # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       - name: Generate code coverage report.
-        run:
-          cargo tarpaulin
+        run: cargo tarpaulin
+          --engine llvm
           --all-features
           --workspace
           --timeout 180
