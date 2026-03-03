@@ -1,4 +1,5 @@
 mod book_coverage_tests;
+mod book_manager_cross_cancel_tests;
 #[cfg(feature = "journal")]
 mod filejournal_edge_case_tests;
 mod implied_volatility_tests;
