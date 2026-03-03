@@ -11,7 +11,9 @@
 
 use crate::orderbook::OrderBook;
 use crate::orderbook::error::ManagerError;
+use crate::orderbook::mass_cancel::MassCancelResult;
 use crate::orderbook::trade::{TradeEvent, TradeListener, TradeResult};
+use pricelevel::{Hash32, Side};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -115,6 +117,74 @@ where
                 trade.trade_id()
             );
         }
+    }
+}
+
+impl<T> BookManagerStd<T>
+where
+    T: Clone + Send + Sync + Default + 'static,
+{
+    /// Cancel all orders across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    /// Books with no orders produce a result with `cancelled_count == 0`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use orderbook_rs::orderbook::manager::{BookManager, BookManagerStd};
+    /// use pricelevel::{Id, Side, TimeInForce};
+    ///
+    /// let mut mgr: BookManagerStd<()> = BookManagerStd::new();
+    /// mgr.add_book("BTC/USD");
+    /// mgr.add_book("ETH/USD");
+    ///
+    /// if let Some(book) = mgr.get_book("BTC/USD") {
+    ///     book.add_limit_order(Id::new_uuid(), 100, 10, Side::Buy, TimeInForce::Gtc, None).ok();
+    /// }
+    ///
+    /// let results = mgr.cancel_all_across_books();
+    /// assert!(results.contains_key("BTC/USD"));
+    /// ```
+    #[must_use]
+    pub fn cancel_all_across_books(&self) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_all_orders()))
+            .collect()
+    }
+
+    /// Cancel all orders for a specific user across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` — the user whose orders should be cancelled
+    #[must_use]
+    pub fn cancel_by_user_across_books(
+        &self,
+        user_id: Hash32,
+    ) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_orders_by_user(user_id)))
+            .collect()
+    }
+
+    /// Cancel all orders on a specific side across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    ///
+    /// # Arguments
+    ///
+    /// * `side` — the side to cancel ([`Side::Buy`] or [`Side::Sell`])
+    #[must_use]
+    pub fn cancel_by_side_across_books(&self, side: Side) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_orders_by_side(side)))
+            .collect()
     }
 }
 
@@ -251,6 +321,56 @@ where
                 trade.trade_id()
             );
         }
+    }
+}
+
+impl<T> BookManagerTokio<T>
+where
+    T: Clone + Send + Sync + Default + 'static,
+{
+    /// Cancel all orders across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    /// Books with no orders produce a result with `cancelled_count == 0`.
+    #[must_use]
+    pub fn cancel_all_across_books(&self) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_all_orders()))
+            .collect()
+    }
+
+    /// Cancel all orders for a specific user across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` — the user whose orders should be cancelled
+    #[must_use]
+    pub fn cancel_by_user_across_books(
+        &self,
+        user_id: Hash32,
+    ) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_orders_by_user(user_id)))
+            .collect()
+    }
+
+    /// Cancel all orders on a specific side across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    ///
+    /// # Arguments
+    ///
+    /// * `side` — the side to cancel ([`Side::Buy`] or [`Side::Sell`])
+    #[must_use]
+    pub fn cancel_by_side_across_books(&self, side: Side) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_orders_by_side(side)))
+            .collect()
     }
 }
 
