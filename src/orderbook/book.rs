@@ -117,6 +117,11 @@ pub struct OrderBook<T = ()> {
     /// Fee schedule for calculating trading fees. When None, no fees are applied.
     /// Fees are calculated during trade execution and can be configured per orderbook.
     pub(super) fee_schedule: Option<FeeSchedule>,
+
+    /// Optional order state tracker for explicit lifecycle tracking.
+    /// When `Some`, every order transition (Open, PartiallyFilled, Filled,
+    /// Cancelled, Rejected) is recorded. When `None`, zero overhead.
+    pub(super) order_state_tracker: Option<super::order_state::OrderStateTracker>,
 }
 
 impl<T> Serialize for OrderBook<T>
@@ -376,6 +381,7 @@ where
             max_order_size: None,
             stp_mode: STPMode::None,
             fee_schedule: None,
+            order_state_tracker: None,
         }
     }
 
@@ -443,6 +449,7 @@ where
             max_order_size: None,
             stp_mode: STPMode::None,
             fee_schedule: None,
+            order_state_tracker: None,
         }
     }
 
@@ -486,6 +493,7 @@ where
             max_order_size: None,
             stp_mode: STPMode::None,
             fee_schedule: None,
+            order_state_tracker: None,
         }
     }
 
@@ -647,6 +655,81 @@ where
     #[inline]
     pub fn stp_mode(&self) -> STPMode {
         self.stp_mode
+    }
+
+    /// Set an order state tracker for explicit lifecycle tracking.
+    ///
+    /// When set, every order transition (Open, PartiallyFilled, Filled,
+    /// Cancelled, Rejected) is recorded and queryable via
+    /// [`order_status`](Self::order_status).
+    pub fn set_order_state_tracker(&mut self, tracker: super::order_state::OrderStateTracker) {
+        self.order_state_tracker = Some(tracker);
+    }
+
+    /// Returns the current status of an order, or `None` if no tracker
+    /// is configured or the order is unknown.
+    #[must_use]
+    pub fn order_status(&self, order_id: Id) -> Option<super::order_state::OrderStatus> {
+        self.order_state_tracker
+            .as_ref()
+            .and_then(|t| t.get(order_id))
+    }
+
+    /// Returns a reference to the order state tracker, if configured.
+    #[must_use]
+    pub fn order_state_tracker(&self) -> Option<&super::order_state::OrderStateTracker> {
+        self.order_state_tracker.as_ref()
+    }
+
+    /// Returns the full transition history for an order.
+    ///
+    /// Each entry is a `(timestamp_ns, OrderStatus)` pair in chronological
+    /// order. Returns `None` if no tracker is configured or the order ID
+    /// was never submitted.
+    #[must_use]
+    pub fn get_order_history(
+        &self,
+        order_id: Id,
+    ) -> Option<Vec<(u64, super::order_state::OrderStatus)>> {
+        self.order_state_tracker
+            .as_ref()
+            .and_then(|t| t.get_history(order_id))
+    }
+
+    /// Returns the number of orders currently in an active state
+    /// (`Open` or `PartiallyFilled`).
+    ///
+    /// Returns `0` if no tracker is configured.
+    #[must_use]
+    pub fn active_order_count(&self) -> usize {
+        self.order_state_tracker
+            .as_ref()
+            .map(|t| t.active_count())
+            .unwrap_or(0)
+    }
+
+    /// Returns the number of orders currently in a terminal state
+    /// (`Filled`, `Cancelled`, or `Rejected`).
+    ///
+    /// Returns `0` if no tracker is configured.
+    #[must_use]
+    pub fn terminal_order_count(&self) -> usize {
+        self.order_state_tracker
+            .as_ref()
+            .map(|t| t.terminal_count())
+            .unwrap_or(0)
+    }
+
+    /// Remove all terminal-state entries whose last transition is older
+    /// than `older_than` ago.
+    ///
+    /// Active orders are never purged. Returns the number of entries
+    /// removed, or `0` if no tracker is configured.
+    pub fn purge_terminal_states(&self, older_than: std::time::Duration) -> usize {
+        self.order_state_tracker
+            .as_ref()
+            .map(|t| t.purge_terminal_older_than(older_than))
+            .unwrap_or(0)
     }
 
     /// Create a new order book for the given symbol with Self-Trade Prevention.
@@ -2160,12 +2243,25 @@ where
     }
 
     /// Create a checksum-protected snapshot package of the entire book.
+    ///
+    /// The returned package includes the book's configuration fields
+    /// (`fee_schedule`, `stp_mode`, `tick_size`, `lot_size`,
+    /// `min_order_size`, `max_order_size`) so that
+    /// [`restore_from_snapshot_package`](Self::restore_from_snapshot_package)
+    /// can fully reconstruct the book's state.
     pub fn create_snapshot_package(
         &self,
         depth: usize,
     ) -> Result<OrderBookSnapshotPackage, OrderBookError> {
         let snapshot = self.create_snapshot(depth);
-        OrderBookSnapshotPackage::new(snapshot)
+        let mut package = OrderBookSnapshotPackage::new(snapshot)?;
+        package.fee_schedule = self.fee_schedule;
+        package.stp_mode = self.stp_mode;
+        package.tick_size = self.tick_size;
+        package.lot_size = self.lot_size;
+        package.min_order_size = self.min_order_size;
+        package.max_order_size = self.max_order_size;
+        Ok(package)
     }
 
     /// Serialize a checksum-protected snapshot package to JSON.
@@ -2174,15 +2270,41 @@ where
     }
 
     /// Restore the book state from a checksum-validated snapshot package.
+    ///
+    /// This restores both the order data and the configuration fields
+    /// (`fee_schedule`, `stp_mode`, `tick_size`, `lot_size`,
+    /// `min_order_size`, `max_order_size`) that were captured by
+    /// [`create_snapshot_package`](Self::create_snapshot_package).
     pub fn restore_from_snapshot_package(
-        &self,
+        &mut self,
         package: OrderBookSnapshotPackage,
     ) -> Result<(), OrderBookError> {
-        self.restore_from_snapshot(package.into_snapshot()?)
+        // Extract config before consuming the package via into_snapshot().
+        let fee_schedule = package.fee_schedule;
+        let stp_mode = package.stp_mode;
+        let tick_size = package.tick_size;
+        let lot_size = package.lot_size;
+        let min_order_size = package.min_order_size;
+        let max_order_size = package.max_order_size;
+
+        self.restore_from_snapshot(package.into_snapshot()?)?;
+
+        // Apply configuration that was captured in the package.
+        self.fee_schedule = fee_schedule;
+        self.stp_mode = stp_mode;
+        self.tick_size = tick_size;
+        self.lot_size = lot_size;
+        self.min_order_size = min_order_size;
+        self.max_order_size = max_order_size;
+
+        Ok(())
     }
 
     /// Restore the book state from a JSON payload containing a checksum-protected snapshot package.
-    pub fn restore_from_snapshot_json(&self, data: &str) -> Result<(), OrderBookError> {
+    ///
+    /// This restores both order data and configuration fields.
+    /// See [`restore_from_snapshot_package`](Self::restore_from_snapshot_package).
+    pub fn restore_from_snapshot_json(&mut self, data: &str) -> Result<(), OrderBookError> {
         let package = OrderBookSnapshotPackage::from_json(data)?;
         self.restore_from_snapshot_package(package)
     }

@@ -10,7 +10,10 @@
 //! for both standard library (`BookManagerStd`) and Tokio (`BookManagerTokio`) channels.
 
 use crate::orderbook::OrderBook;
+use crate::orderbook::error::ManagerError;
+use crate::orderbook::mass_cancel::MassCancelResult;
 use crate::orderbook::trade::{TradeEvent, TradeListener, TradeResult};
+use pricelevel::{Hash32, Side};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -74,13 +77,15 @@ where
     }
 
     /// Start the trade event processor in a separate thread.
-    pub fn start_trade_processor(&mut self) -> std::thread::JoinHandle<()> {
+    ///
+    /// Returns an error if the processor has already been started.
+    pub fn start_trade_processor(&mut self) -> Result<std::thread::JoinHandle<()>, ManagerError> {
         let receiver = self
             .trade_receiver
             .take()
-            .expect("Trade processor already started");
+            .ok_or(ManagerError::ProcessorAlreadyStarted)?;
 
-        std::thread::spawn(move || {
+        Ok(std::thread::spawn(move || {
             info!("Trade processor started");
 
             while let Ok(trade_event) = receiver.recv() {
@@ -88,7 +93,7 @@ where
             }
 
             info!("Trade processor stopped");
-        })
+        }))
     }
 
     /// Process a single trade event.
@@ -115,6 +120,74 @@ where
     }
 }
 
+impl<T> BookManagerStd<T>
+where
+    T: Clone + Send + Sync + Default + 'static,
+{
+    /// Cancel all orders across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    /// Books with no orders produce a result with `cancelled_count == 0`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use orderbook_rs::orderbook::manager::{BookManager, BookManagerStd};
+    /// use pricelevel::{Id, Side, TimeInForce};
+    ///
+    /// let mut mgr: BookManagerStd<()> = BookManagerStd::new();
+    /// mgr.add_book("BTC/USD");
+    /// mgr.add_book("ETH/USD");
+    ///
+    /// if let Some(book) = mgr.get_book("BTC/USD") {
+    ///     book.add_limit_order(Id::new_uuid(), 100, 10, Side::Buy, TimeInForce::Gtc, None).ok();
+    /// }
+    ///
+    /// let results = mgr.cancel_all_across_books();
+    /// assert!(results.contains_key("BTC/USD"));
+    /// ```
+    #[must_use]
+    pub fn cancel_all_across_books(&self) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_all_orders()))
+            .collect()
+    }
+
+    /// Cancel all orders for a specific user across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` — the user whose orders should be cancelled
+    #[must_use]
+    pub fn cancel_by_user_across_books(
+        &self,
+        user_id: Hash32,
+    ) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_orders_by_user(user_id)))
+            .collect()
+    }
+
+    /// Cancel all orders on a specific side across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    ///
+    /// # Arguments
+    ///
+    /// * `side` — the side to cancel ([`Side::Buy`] or [`Side::Sell`])
+    #[must_use]
+    pub fn cancel_by_side_across_books(&self, side: Side) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_orders_by_side(side)))
+            .collect()
+    }
+}
+
 impl<T> BookManager<T> for BookManagerStd<T>
 where
     T: Clone + Send + Sync + Default + 'static,
@@ -127,10 +200,7 @@ where
             let trade_event = TradeEvent {
                 symbol: trade_result.symbol.clone(),
                 trade_result: trade_result.clone(),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
+                timestamp: crate::current_time_millis(),
             };
 
             if let Err(e) = sender.send(trade_event) {
@@ -211,14 +281,15 @@ where
 
     /// Start the trade event processor as an async task.
     ///
-    /// Returns a JoinHandle for the spawned task.
-    pub fn start_trade_processor(&mut self) -> tokio::task::JoinHandle<()> {
+    /// Returns a JoinHandle for the spawned task, or an error if the
+    /// processor has already been started.
+    pub fn start_trade_processor(&mut self) -> Result<tokio::task::JoinHandle<()>, ManagerError> {
         let mut receiver = self
             .trade_receiver
             .take()
-            .expect("Trade processor already started");
+            .ok_or(ManagerError::ProcessorAlreadyStarted)?;
 
-        tokio::spawn(async move {
+        Ok(tokio::spawn(async move {
             info!("Trade processor started (Tokio)");
 
             while let Some(trade_event) = receiver.recv().await {
@@ -226,7 +297,7 @@ where
             }
 
             info!("Trade processor stopped (Tokio)");
-        })
+        }))
     }
 
     /// Process a single trade event.
@@ -253,6 +324,56 @@ where
     }
 }
 
+impl<T> BookManagerTokio<T>
+where
+    T: Clone + Send + Sync + Default + 'static,
+{
+    /// Cancel all orders across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    /// Books with no orders produce a result with `cancelled_count == 0`.
+    #[must_use]
+    pub fn cancel_all_across_books(&self) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_all_orders()))
+            .collect()
+    }
+
+    /// Cancel all orders for a specific user across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` — the user whose orders should be cancelled
+    #[must_use]
+    pub fn cancel_by_user_across_books(
+        &self,
+        user_id: Hash32,
+    ) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_orders_by_user(user_id)))
+            .collect()
+    }
+
+    /// Cancel all orders on a specific side across all managed books.
+    ///
+    /// Returns a map from symbol to the [`MassCancelResult`] for that book.
+    ///
+    /// # Arguments
+    ///
+    /// * `side` — the side to cancel ([`Side::Buy`] or [`Side::Sell`])
+    #[must_use]
+    pub fn cancel_by_side_across_books(&self, side: Side) -> HashMap<String, MassCancelResult> {
+        self.books
+            .iter()
+            .map(|(symbol, book)| (symbol.clone(), book.cancel_orders_by_side(side)))
+            .collect()
+    }
+}
+
 impl<T> BookManager<T> for BookManagerTokio<T>
 where
     T: Clone + Send + Sync + Default + 'static,
@@ -265,10 +386,7 @@ where
             let trade_event = TradeEvent {
                 symbol: trade_result.symbol.clone(),
                 trade_result: trade_result.clone(),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
+                timestamp: crate::current_time_millis(),
             };
 
             if let Err(e) = sender.send(trade_event) {

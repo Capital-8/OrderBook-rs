@@ -18,8 +18,8 @@
 
 // Core order book types
 pub use crate::orderbook::OrderBook;
-pub use crate::orderbook::OrderBookError;
 pub use crate::orderbook::manager::{BookManager, BookManagerStd, BookManagerTokio};
+pub use crate::orderbook::{ManagerError, OrderBookError};
 
 // Iterator types
 pub use crate::orderbook::iterators::LevelInfo;
@@ -44,6 +44,11 @@ pub use pricelevel::{Id, OrderType, Side, TimeInForce};
 // Legacy alias for backward compatibility
 pub use crate::OrderId;
 
+// Order state tracking types
+pub use crate::orderbook::order_state::{
+    CancelReason, OrderStateListener, OrderStateTracker, OrderStatus,
+};
+
 // Event serialization types
 #[cfg(feature = "bincode")]
 pub use crate::orderbook::serialization::BincodeEventSerializer;
@@ -59,12 +64,12 @@ pub use crate::orderbook::nats_book_change::{
     BookChangeBatch, BookChangeEntry, NatsBookChangePublisher,
 };
 
-// Sequencer types and journal
+// Sequencer and journal types
 #[cfg(feature = "journal")]
 pub use crate::orderbook::sequencer::FileJournal;
-pub use crate::orderbook::sequencer::journal::{Journal, JournalEntry};
 pub use crate::orderbook::sequencer::{
-    JournalError, JournalReadIter, SequencerCommand, SequencerEvent, SequencerResult,
+    InMemoryJournal, Journal, JournalEntry, JournalError, JournalReadIter, ReplayEngine,
+    ReplayError, SequencerCommand, SequencerEvent, SequencerResult, snapshots_match,
 };
 
 // Utility functions

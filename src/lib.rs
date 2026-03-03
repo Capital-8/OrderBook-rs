@@ -32,17 +32,37 @@
 //! - **Research**: Platform for studying market microstructure and order flow
 //! - **Educational**: Reference implementation for understanding modern exchange architecture
 //!
-//! ## What's New in Version 0.4.8
+//! ## What's New in Version 0.6.0
 //!
-//! This version introduces significant performance optimizations and architectural improvements:
+//! ### v0.6.0 — NATS Integration, Sequencer & Order State
 //!
-//! - **Performance Boost**: Reintroduced `PriceLevelCache` for faster best bid/ask lookups and a `MatchingPool` to reduce memory allocations in the matching engine, leading to lower latency.
-//! - **Cleaner Architecture**: Refactored modification and matching logic for better separation of concerns and maintainability.
-//! - **Enhanced Concurrency**: Improved thread-safe operations, ensuring robustness under heavy load.
-//! - **Improved Documentation**: All code comments have been translated to English, and crate-level documentation has been expanded for clarity.
+//! - **NATS JetStream Publishers**: Trade event and book change publishers with retry, batching, and throttling (`nats` feature)
+//! - **Zero-Copy Serialization**: Pluggable `EventSerializer` trait with JSON and Bincode implementations (`bincode` feature)
+//! - **Sequencer Subsystem**: `SequencerCommand`, `SequencerEvent`, `SequencerResult` types for LMAX Disruptor-style total ordering
+//! - **Append-Only Journal**: `FileJournal` with memory-mapped segments, CRC32 checksums, and segment rotation (`journal` feature)
+//! - **In-Memory Journal**: `InMemoryJournal` for testing and benchmarking
+//! - **Deterministic Replay**: `ReplayEngine` for disaster recovery and state verification from journal
+//! - **Order State Machine**: `OrderStatus`, `CancelReason`, `OrderStateTracker` for explicit lifecycle tracking (Open → PartiallyFilled → Filled / Cancelled / Rejected)
+//! - **Order Lifecycle Query API**: `get_order_history()`, `active_order_count()`, `terminal_order_count()`, `purge_terminal_states()`
+//! - **Upgrade to pricelevel v0.7**: `Id`, `Price`, `Quantity`, `TimestampMs` newtypes for stronger type safety
+//!
+//! ### v0.5.x — Validation, STP, Fees & Mass Cancel
+//!
+//! - **Order Validation**: Tick size, lot size, and min/max order size validation with configurable limits
+//! - **Self-Trade Prevention (STP)**: `CancelTaker`, `CancelMaker`, `CancelBoth` modes with per-order `user_id` enforcement
+//! - **Fee Model**: Configurable `FeeSchedule` with maker/taker fees, fee fields in `TradeResult`
+//! - **Mass Cancel Operations**: Cancel all, by side, by user, by price range — with `MassCancelResult` tracking
+//! - **Cross-Book Mass Cancel**: `cancel_all_across_books()`, `cancel_by_user_across_books()`, `cancel_by_side_across_books()` on `BookManager`
+//! - **Snapshot Config Preservation**: `restore_from_snapshot_package()` preserves fee schedule, STP mode, tick/lot size, and order size limits
+//!
+//! ### v0.4.8 — Performance & Architecture
+//!
+//! - **Performance Boost**: `PriceLevelCache` for faster best bid/ask lookups, `MatchingPool` to reduce matching engine allocations
+//! - **Cleaner Architecture**: Refactored modification and matching logic for better separation of concerns
+//! - **Enhanced Concurrency**: Improved thread-safe operations under heavy load
 //!
 //! ## Status
-//! This project is currently in active development and is not yet suitable for production use.
+//! This project is in active development. The core matching engine, order validation, STP, fees, mass cancel, NATS integration, sequencer journal, and order state tracking are production-ready. The Sequencer runtime (async event loop) is under development.
 //!
 //! ## Advanced Features
 //!
@@ -250,9 +270,12 @@ pub use orderbook::implied_volatility::{
 pub use orderbook::iterators::LevelInfo;
 pub use orderbook::manager::{BookManager, BookManagerStd, BookManagerTokio};
 pub use orderbook::market_impact::{MarketImpact, OrderSimulation};
+pub use orderbook::order_state::{
+    CancelReason, OrderStateListener, OrderStateTracker, OrderStatus,
+};
 pub use orderbook::sequencer::{
-    Journal, JournalEntry, JournalError, JournalReadIter, SequencerCommand, SequencerEvent,
-    SequencerResult,
+    InMemoryJournal, Journal, JournalEntry, JournalError, JournalReadIter, ReplayEngine,
+    ReplayError, SequencerCommand, SequencerEvent, SequencerResult, snapshots_match,
 };
 pub use orderbook::serialization::{EventSerializer, JsonEventSerializer, SerializationError};
 pub use orderbook::snapshot::{EnrichedSnapshot, MetricFlags};
@@ -261,7 +284,9 @@ pub use orderbook::stp::STPMode;
 pub use orderbook::trade::{TradeListener, TradeResult};
 #[cfg(feature = "nats")]
 pub use orderbook::{BookChangeBatch, BookChangeEntry, NatsBookChangePublisher};
-pub use orderbook::{FeeSchedule, MassCancelResult, OrderBook, OrderBookError, OrderBookSnapshot};
+pub use orderbook::{
+    FeeSchedule, ManagerError, MassCancelResult, OrderBook, OrderBookError, OrderBookSnapshot,
+};
 pub use utils::current_time_millis;
 
 /// Legacy type alias for `OrderBook<()>` to maintain backward compatibility.
@@ -277,7 +302,7 @@ pub type LegacyOrderBook = OrderBook<()>;
 /// with unit type `()` as the extra fields parameter.
 pub type DefaultOrderBook = OrderBook<()>;
 
-// Re-export tipos de pricelevel con alias
+// Re-export pricelevel types with aliases
 pub use pricelevel::{Id, OrderType, Side, TimeInForce};
 
 /// Legacy type alias for backward compatibility with code using `OrderId`.
