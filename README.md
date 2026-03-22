@@ -46,9 +46,9 @@ This order book engine is built with the following design principles:
 - **Research**: Platform for studying market microstructure and order flow
 - **Educational**: Reference implementation for understanding modern exchange architecture
 
-### What's New in Version 0.6.0
+### What's New in Version 0.6.1
 
-#### v0.6.0 — NATS Integration, Sequencer & Order State
+#### v0.6.1 — NATS Integration, Sequencer & Order State
 
 - **NATS JetStream Publishers**: Trade event and book change publishers with retry, batching, and throttling (`nats` feature)
 - **Zero-Copy Serialization**: Pluggable `EventSerializer` trait with JSON and Bincode implementations (`bincode` feature)
