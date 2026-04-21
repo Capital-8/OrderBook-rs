@@ -457,6 +457,35 @@ where
     /// This is the internal implementation used by both `cancel_order`
     /// and mass cancel operations to track the correct
     /// [`CancelReason`] in the order state tracker.
+    ///
+    /// [FIX 2026-04-21 ghost-level] The empty-level cleanup now runs
+    /// unconditionally at the end of the function, independent of whether
+    /// this particular cancel hit `Ok(Some(order))`. Previously the
+    /// `price_levels.remove(&price)` was nested inside
+    /// `if let Some(ref cancelled_order) = result`, so these two scenarios
+    /// leaked empty levels into the SkipMap:
+    ///
+    ///   1. The level's last remaining order was already removed by a
+    ///      prior operation (concurrent cancel, match that drained it,
+    ///      etc.). Our `price_level.update_order(Cancel)` here returns
+    ///      `Ok(None)` → `result = None` → the `if let Some(...)` branch
+    ///      is skipped → empty level stays in the SkipMap. `best_bid()`
+    ///      and `best_ask()` then return that ghost price forever.
+    ///   2. `price_level.update_order(Cancel)` returned `Err(_)` (index
+    ///      out of sync). `empty_level` was never set because the `Ok(_)`
+    ///      arm is where it used to be computed. Same leak.
+    ///
+    /// Additionally, `empty_level` is now computed **outside** the
+    /// `if let Ok(cancelled)` branch so that case (2) above is also
+    /// handled — we check the post-state of the level regardless of
+    /// whether this cancel was the one that removed an order.
+    ///
+    /// Symptom observed in production: B3 MBO replay of WINM26 accumulated
+    /// 11 empty ask levels over 30 seconds, pinning `best_ask()` to a
+    /// ghost price of 200015 while real asks moved to 200200+. Client EA
+    /// orders ended up in the `Cold` tier (far from stale BBO) and sat
+    /// for 30s until FSM timeout. After this fix empty levels are always
+    /// reaped.
     pub(super) fn cancel_order_with_reason(
         &self,
         order_id: Id,
@@ -496,10 +525,14 @@ where
                             quantity: price_level.visible_quantity(),
                         })
                     }
-
-                    // Check if the level became empty
-                    empty_level = price_level.order_count() == 0;
                 }
+
+                // [FIX 2026-04-21 ghost-level] Check empty state regardless
+                // of whether the update_order call succeeded — the level
+                // may have been drained by a concurrent path before this
+                // cancel arrived (e.g. a match that consumed all orders
+                // just before us), and we still need to reap it.
+                empty_level = price_level.order_count() == 0;
             }
 
             self.cache.invalidate();
@@ -534,11 +567,15 @@ where
                     self.special_order_tracker
                         .unregister_trailing_stop(&order_id);
                 }
+            }
 
-                // If the level became empty, remove it
-                if empty_level {
-                    price_levels.remove(&price);
-                }
+            // [FIX 2026-04-21 ghost-level] Unconditional empty-level
+            // reaping, moved out of the `if let Some(cancelled_order)`
+            // branch. The SkipMap must never carry a PriceLevel with
+            // `order_count() == 0`; otherwise `best_bid()` / `best_ask()`
+            // return ghost prices.
+            if empty_level {
+                price_levels.remove(&price);
             }
 
             Ok(result.map(|order| Arc::new(self.convert_from_unit_type(&order))))
