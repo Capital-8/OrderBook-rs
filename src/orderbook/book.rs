@@ -774,11 +774,41 @@ where
     /// O(1) operation using SkipMap's ordered structure (highest price is last)
     pub fn best_bid(&self) -> Option<u128> {
         if let Some(cached_bid) = self.cache.get_cached_best_bid() {
+            // [DIAG-GHOST 2026-04-21] Alerta se cache aponta para level
+            // que existe mas tem 0 orders (fantasma). Rate-limited via
+            // static counter para não floodar log.
+            if let Some(entry) = self.bids.get(&cached_bid) {
+                if entry.value().order_count() == 0 {
+                    use std::sync::atomic::{AtomicU64, Ordering as O};
+                    static GHOST_BID_HITS: AtomicU64 = AtomicU64::new(0);
+                    let n = GHOST_BID_HITS.fetch_add(1, O::Relaxed);
+                    if n < 5 || n.is_multiple_of(1000) {
+                        eprintln!(
+                            "[DIAG-GHOST] best_bid cache HIT stale: price={} order_count=0 (hit #{})",
+                            cached_bid, n
+                        );
+                    }
+                }
+            }
             return Some(cached_bid);
         }
 
-        // SkipMap maintains sorted order, best bid (highest price) is last
-        let best_price = self.bids.iter().next_back().map(|entry| *entry.key());
+        // SkipMap maintains sorted order, best bid (highest price) is last.
+        // [DIAG-GHOST 2026-04-21] Captura scan que retorna level fantasma.
+        let best_price = self.bids.iter().next_back().map(|entry| {
+            if entry.value().order_count() == 0 {
+                use std::sync::atomic::{AtomicU64, Ordering as O};
+                static GHOST_BID_SCAN: AtomicU64 = AtomicU64::new(0);
+                let n = GHOST_BID_SCAN.fetch_add(1, O::Relaxed);
+                if n < 5 || n.is_multiple_of(1000) {
+                    eprintln!(
+                        "[DIAG-GHOST] best_bid scan HIT ghost: price={} (scan #{})",
+                        *entry.key(), n
+                    );
+                }
+            }
+            *entry.key()
+        });
 
         self.cache.update_best_prices(best_price, None);
 
@@ -791,11 +821,39 @@ where
     /// O(1) operation using SkipMap's ordered structure (lowest price is first)
     pub fn best_ask(&self) -> Option<u128> {
         if let Some(cached_ask) = self.cache.get_cached_best_ask() {
+            // [DIAG-GHOST 2026-04-21] Alerta se cache aponta para level
+            // com 0 orders (fantasma).
+            if let Some(entry) = self.asks.get(&cached_ask) {
+                if entry.value().order_count() == 0 {
+                    use std::sync::atomic::{AtomicU64, Ordering as O};
+                    static GHOST_ASK_HITS: AtomicU64 = AtomicU64::new(0);
+                    let n = GHOST_ASK_HITS.fetch_add(1, O::Relaxed);
+                    if n < 5 || n.is_multiple_of(1000) {
+                        eprintln!(
+                            "[DIAG-GHOST] best_ask cache HIT stale: price={} order_count=0 (hit #{})",
+                            cached_ask, n
+                        );
+                    }
+                }
+            }
             return Some(cached_ask);
         }
 
-        // SkipMap maintains sorted order, best ask (lowest price) is first
-        let best_price = self.asks.iter().next().map(|entry| *entry.key());
+        // [DIAG-GHOST 2026-04-21] Captura scan que retorna level fantasma.
+        let best_price = self.asks.iter().next().map(|entry| {
+            if entry.value().order_count() == 0 {
+                use std::sync::atomic::{AtomicU64, Ordering as O};
+                static GHOST_ASK_SCAN: AtomicU64 = AtomicU64::new(0);
+                let n = GHOST_ASK_SCAN.fetch_add(1, O::Relaxed);
+                if n < 5 || n.is_multiple_of(1000) {
+                    eprintln!(
+                        "[DIAG-GHOST] best_ask scan HIT ghost: price={} (scan #{})",
+                        *entry.key(), n
+                    );
+                }
+            }
+            *entry.key()
+        });
 
         self.cache.update_best_prices(None, best_price);
 

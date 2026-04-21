@@ -283,6 +283,35 @@ where
             match_side.remove(price);
         }
 
+        // [DIAG-GHOST 2026-04-21] Post-check: se após o batch remove ainda
+        // há algum level no top com order_count()==0, marcou um fantasma
+        // NÃO capturado por process_level_match. Reap e loga.
+        {
+            use std::sync::atomic::{AtomicU64, Ordering as O};
+            static POST_GHOSTS: AtomicU64 = AtomicU64::new(0);
+            let mut ghost_prices: Vec<u128> = Vec::new();
+            // Inspeciona os primeiros 4 levels do match_side (top) — custo
+            // mínimo mesmo em book denso.
+            for (idx, entry) in match_side.iter().enumerate() {
+                if idx >= 4 {
+                    break;
+                }
+                if entry.value().order_count() == 0 {
+                    ghost_prices.push(*entry.key());
+                }
+            }
+            for price in &ghost_prices {
+                match_side.remove(price);
+                let n = POST_GHOSTS.fetch_add(1, O::Relaxed);
+                if n < 20 || n.is_multiple_of(500) {
+                    eprintln!(
+                        "[DIAG-GHOST] match_order post-reap level={} (was not in empty_price_levels; ghost #{})",
+                        price, n
+                    );
+                }
+            }
+        }
+
         // Batch remove filled orders from tracking and update state
         for filled_id in &filled_orders {
             // Track the resting order as Filled (quantity unknown here;
